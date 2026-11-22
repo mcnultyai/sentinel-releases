@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>Camera Measure</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --text: #eef1f5; --muted: #9aa4b2;
+    --accent: #ffcc33; --ref: #33c3ff; --line: #ff5c7a; --border: #2c333d;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+  header { padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top));
+    display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  #status { padding: 8px 16px; font-size: 14px; color: var(--muted); height: calc(3 * 1.4em + 16px); overflow: hidden; flex: none; }
+  #status b { color: var(--text); }
+  #stage { flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; background: #000; touch-action: none; }
+  video, canvas#view { max-width: 100%; max-height: 100%; display: block; }
+  canvas#view { touch-action: none; }
+  #loupe { position: absolute; top: 10px; left: 10px; width: 120px; height: 120px; border-radius: 50%;
+    border: 2px solid var(--accent); display: none; pointer-events: none; background: #000; }
+  #placeholder { color: var(--muted); text-align: center; padding: 24px; max-width: 420px; }
+  #placeholder p { margin: 0 0 12px; }
+  .bar { display: flex; gap: 8px; padding: 10px 16px; flex-wrap: wrap; border-top: 1px solid var(--border);
+    background: var(--panel); }
+  .bar:last-child { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  button, select, input { font: inherit; color: var(--text); background: #262d36; border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; min-height: 44px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .4; }
+  select { flex: 1; min-width: 0; }
+  input[type=number] { width: 84px; }
+  .grow { flex: 1; }
+  .hidden { display: none !important; }
+  label.file { display: inline-flex; align-items: center; }
+  label.file input { display: none; }
+  #results { position: absolute; left: 8px; bottom: 8px; padding: 4px 12px; max-height: 40%; min-width: 150px;
+    overflow: auto; background: rgba(17,20,24,.85); border-radius: 10px; pointer-events: none; font-size: 14px; }
+  #results:empty { display: none; }
+  .res { display: flex; justify-content: space-between; gap: 16px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .res span:first-child { color: var(--muted); }
+  .res b { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📏 Camera Measure</h1>
+  <select id="unit" aria-label="Units" style="flex:0 0 auto; width:auto">
+    <option value="mm">mm</option><option value="cm" selected>cm</option>
+    <option value="in">in</option><option value="m">m</option>
+  </select>
+</header>
+
+<div id="status">Point your camera at the thing you want to measure, with a reference object of known size lying flat beside it.</div>
+
+<div id="stage">
+  <div id="placeholder">
+    <p>Place a <b>reference object</b> (bank card, A4 / Letter sheet, or anything you know the size of) on the <b>same flat surface</b> as what you want to measure.</p>
+    <p>Then open the camera or choose a photo.</p>
+  </div>
+  <video id="video" playsinline muted autoplay class="hidden"></video>
+  <canvas id="view" class="hidden"></canvas>
+  <canvas id="loupe" width="240" height="240"></canvas>
+  <div id="results"></div>
+</div>
+
+<!-- Capture controls -->
+<div class="bar" id="captureBar">
+  <button class="primary grow" id="btnCamera">Open camera</button>
+  <button class="primary grow hidden" id="btnSnap">Capture</button>
+  <label class="file button"><input type="file" id="fileInput" accept="image/*" capture="environment"><button type="button" id="btnFile">Photo…</button></label>
+</div>
+
+<!-- Calibration / measuring controls -->
+<div class="bar hidden" id="refBar">
+  <select id="refType" aria-label="Reference object">
+    <option value="card">Bank / ID card (85.6 × 54 mm)</option>
+    <option value="a4">A4 paper (210 × 297 mm)</option>
+    <option value="letter">US Letter (8.5 × 11 in)</option>
+    <option value="rect">Custom rectangle…</option>
+    <option value="line">Known length (2 points)…</option>
+  </select>
+  <span id="customRect" class="hidden"><input type="number" id="rw" placeholder="W" step="any" inputmode="decimal"> × <input type="number" id="rh" placeholder="H" step="any" inputmode="decimal"></span>
+  <span id="customLine" class="hidden"><input type="number" id="rl" placeholder="Length" step="any" inputmode="decimal"></span>
+</div>
+<div class="bar hidden" id="actionBar">
+  <button id="btnUndo">Undo</button>
+  <button id="btnRecal">Recalibrate</button>
+  <button id="btnClear">Clear lines</button>
+  <button id="btnNew" class="grow">New photo</button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const video = $('video'), view = $('view'), ctx = view.getContext('2d');
+  const loupe = $('loupe'), lctx = loupe.getContext('2d');
+  const statusEl = $('status');
+
+  // ---------- state ----------
+  let stream = null;
+  let img = null;                 // captured frame (canvas)
+  let refPts = [];                // image-space points for the reference
+  let H = null;                   // homography image->plane (mm), or null
+  let lineScale = null;           // mm per pixel when using 2-point reference
+  let lines = [];                 // [{a:{x,y}, b:{x,y}}]
+  let pending = null;             // first point of a line being placed
+  let drag = null;                // {pt, offX, offY}
+  const MM = { mm: 1, cm: 10, m: 1000, in: 25.4 };
+
+  const REFS = {
+    card:   { kind: 'rect', w: 85.6, h: 53.98 },
+    a4:     { kind: 'rect', w: 210, h: 297 },
+    letter: { kind: 'rect', w: 215.9, h: 279.4 },
+  };
+
+  function unitMM() { return MM[$('unit').value]; }
+  function fmt(mm) {
+    const u = $('unit').value, v = mm / MM[u];
+    const d = u === 'mm' ? 0 : u === 'm' ? 3 : 1;
+    return (u === 'mm' && v < 20 ? v.toFixed(1) : v.toFixed(d)) + ' ' + u;
+  }
+
+  function refSpec() {
+    const t = $('refType').value;
+    if (REFS[t]) return REFS[t];
+    const k = unitMM();
+    if (t === 'rect') {
+      const w = parseFloat($('rw').value), h = parseFloat($('rh').value);
+      return (w > 0 && h > 0) ? { kind: 'rect', w: w * k, h: h * k } : { kind: 'rect', invalid: true };
+    }
+    const l = parseFloat($('rl').value);
+    return l > 0 ? { kind: 'line', len: l * k } : { kind: 'line', invalid: true };
+  }
+  function refNeeded() { return refSpec().kind === 'rect' ? 4 : 2; }
+  function calibrated() { return !!(H || lineScale); }
+
+  // ---------- geometry ----------
+  // Solve Ax=b (n×n) by Gaussian elimination with partial pivoting.
+  function solve(A, b) {
+    const n = b.length;
+    for (let i = 0; i < n; i++) {
+      let p = i;
+      for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+      [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+      if (Math.abs(A[i][i]) < 1e-12) return null;
+      for (let r = i + 1; r < n; r++) {
+        const f = A[r][i] / A[i][i];
+        for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+        b[r] -= f * b[i];
+      }
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let s = b[i];
+      for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c];
+      x[i] = s / A[i][i];
+    }
+    return x;
+  }
+  // Homography mapping src[i] -> dst[i] for 4 point pairs.
+  function homography(src, dst) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const { x, y } = src[i], { x: u, y: v } = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = solve(A, b);
+    return h ? [...h, 1] : null;
+  }
+  function applyH(h, p) {
+    const w = h[6] * p.x + h[7] * p.y + h[8];
+    return { x: (h[0] * p.x + h[1] * p.y + h[2]) / w, y: (h[3] * p.x + h[4] * p.y + h[5]) / w };
+  }
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  // Order 4 points around their centroid so they form a proper quad.
+  function orderQuad(pts) {
+    const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+    return [...pts].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  }
+
+  function calibrate() {
+    H = null; lineScale = null;
+    const spec = refSpec();
+    if (spec.invalid) return;
+    if (spec.kind === 'line' && refPts.length === 2) {
+      lineScale = spec.len / dist(refPts[0], refPts[1]);
+    } else if (spec.kind === 'rect' && refPts.length === 4) {
+      const q = orderQuad(refPts);
+      // Match the longer pair of opposite edges in the image to the longer real side.
+      const e01 = dist(q[0], q[1]) + dist(q[2], q[3]);
+      const e12 = dist(q[1], q[2]) + dist(q[3], q[0]);
+      const long = Math.max(spec.w, spec.h), short = Math.min(spec.w, spec.h);
+      const [a, b] = e01 >= e12 ? [long, short] : [short, long];
+      H = homography(q, [{ x: 0, y: 0 }, { x: a, y: 0 }, { x: a, y: b }, { x: 0, y: b }]);
+    }
+  }
+
+  function measure(a, b) {
+    if (H) return dist(applyH(H, a), applyH(H, b));
+    if (lineScale) return dist(a, b) * lineScale;
+    return null;
+  }
+
+  // ---------- capture ----------
+  async function openCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+    } catch (e) {
+      setStatus('Could not open the camera (' + e.name + '). Use <b>Photo…</b> to take or pick a picture instead. Live camera needs HTTPS.');
+      return;
+    }
+    video.srcObject = stream;
+    show(video); hide(view); hide($('placeholder'));
+    hide($('btnCamera')); show($('btnSnap'));
+    setStatus('Fit the reference object and the thing you want to measure in the frame, hold the phone steady, then tap <b>Capture</b>.');
+  }
+  function stopCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; video.srcObject = null;
+  }
+  function snap() {
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    stopCamera();
+    loadFrame(c);
+  }
+  function loadFile(file) {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => {
+      const max = 2400, s = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.naturalWidth * s); c.height = Math.round(im.naturalHeight * s);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      stopCamera();
+      loadFrame(c);
+    };
+    im.src = url;
+  }
+  function loadFrame(c) {
+    img = c; refPts = []; lines = []; pending = null; H = null; lineScale = null;
+    view.width = c.width; view.height = c.height;
+    hide(video); hide($('placeholder')); show(view);
+    hide($('captureBar')); show($('refBar')); show($('actionBar'));
+    fitCanvas(); render(); updateStatus();
+  }
+  function newPhoto() {
+    img = null; hide(view); show($('placeholder'));
+    show($('captureBar')); show($('btnCamera')); hide($('btnSnap'));
+    hide($('refBar')); hide($('actionBar'));
+    $('results').innerHTML = '';
+    $('fileInput').value = '';
+    setStatus('Point your camera at the thing you want to measure, with a reference object of known size lying flat beside it.');
+  }
+
+  function fitCanvas() {
+    if (!img) return;
+    const st = $('stage').getBoundingClientRect();
+    const s = Math.min(st.width / img.width, st.height / img.height);
+    view.style.width = img.width * s + 'px';
+    view.style.height = img.height * s + 'px';
+  }
+
+  // ---------- rendering ----------
+  function px() { return view.width / view.getBoundingClientRect().width; } // image px per CSS px
+
+  function render() {
+    if (!img) return;
+    const k = px();
+    ctx.drawImage(img, 0, 0);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+    // reference
+    if (refPts.length) {
+      const pts = refPts.length === 4 && refSpec().kind === 'rect' ? orderQuad(refPts) : refPts;
+      ctx.strokeStyle = '#33c3ff'; ctx.lineWidth = 2.5 * k;
+      ctx.fillStyle = 'rgba(51,195,255,.15)';
+      ctx.beginPath();
+      pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      if (pts.length === 4) { ctx.closePath(); ctx.fill(); }
+      ctx.stroke();
+      refPts.forEach(p => handle(p, '#33c3ff', k));
+    }
+
+    // measurement lines
+    lines.forEach((l, i) => {
+      ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 5 * k;
+      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke();
+      ctx.strokeStyle = '#ff5c7a'; ctx.lineWidth = 2.5 * k;
+      ctx.stroke();
+      handle(l.a, '#ff5c7a', k); handle(l.b, '#ff5c7a', k);
+      const mm = measure(l.a, l.b);
+      if (mm != null) label(`${i + 1}: ${fmt(mm)}`, (l.a.x + l.b.x) / 2, (l.a.y + l.b.y) / 2, k);
+    });
+    if (pending) handle(pending, '#ffcc33', k);
+    renderResults();
+  }
+  function handle(p, color, k) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, 9 * k, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fill();
+    ctx.lineWidth = 2 * k; ctx.strokeStyle = color; ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 1.8 * k, 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+  }
+  function label(text, x, y, k) {
+    ctx.font = `600 ${15 * k}px system-ui, sans-serif`;
+    const w = ctx.measureText(text).width + 14 * k, h = 24 * k;
+    ctx.fillStyle = 'rgba(17,20,24,.85)';
+    ctx.beginPath(); ctx.roundRect(x - w / 2, y - h - 10 * k, w, h, 6 * k); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y - h / 2 - 10 * k);
+  }
+  function renderResults() {
+    const el = $('results');
+    if (!calibrated() || !lines.length) { el.innerHTML = ''; return; }
+    el.innerHTML = lines.map((l, i) =>
+      `<div class="res"><span>Line ${i + 1}</span><b>${fmt(measure(l.a, l.b))}</b></div>`).join('');
+  }
+
+  function drawLoupe(p) {
+    const zoom = 3, size = loupe.width, src = size / zoom;
+    lctx.fillStyle = '#000'; lctx.fillRect(0, 0, size, size);
+    lctx.save();
+    lctx.beginPath(); lctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); lctx.clip();
+    lctx.drawImage(view, p.x - src / 2, p.y - src / 2, src, src, 0, 0, size, size);
+    lctx.strokeStyle = '#ffcc33'; lctx.lineWidth = 2;
+    lctx.beginPath();
+    lctx.moveTo(size / 2, 0); lctx.lineTo(size / 2, size / 2 - 8);
+    lctx.moveTo(size / 2, size / 2 + 8); lctx.lineTo(size / 2, size);
+    lctx.moveTo(0, size / 2); lctx.lineTo(size / 2 - 8, size / 2);
+    lctx.moveTo(size / 2 + 8, size / 2); lctx.lineTo(size, size / 2);
+    lctx.stroke();
+    lctx.restore();
+    // Keep the loupe away from the finger.
+    const r = view.getBoundingClientRect(), st = $('stage').getBoundingClientRect();
+    const fx = r.left + p.x / px() - st.left;
+    loupe.style.left = fx < st.width / 2 ? '' : '10px';
+    loupe.style.right = fx < st.width / 2 ? '10px' : '';
+    loupe.style.display = 'block';
+  }
+
+  // ---------- interaction ----------
+  function toImage(e) {
+    const r = view.getBoundingClientRect(), k = view.width / r.width;
+    return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
+  }
+  function allHandles() {
+    const hs = [...refPts];
+    lines.forEach(l => hs.push(l.a, l.b));
+    if (pending) hs.push(pending);
+    return hs;
+  }
+  function hit(p) {
+    const tol = 26 * px();
+    let best = null, bd = tol;
+    allHandles().forEach(h => { const d = dist(h, p); if (d < bd) { bd = d; best = h; } });
+    return best;
+  }
+
+  let downAt = null;
+  view.addEventListener('pointerdown', e => {
+    if (!img) return;
+    view.setPointerCapture(e.pointerId);
+    const p = toImage(e);
+    const h = hit(p);
+    if (h) {
+      drag = { pt: h, offX: h.x - p.x, offY: h.y - p.y };
+    } else {
+      // Place a new point; it stays draggable until the finger lifts.
+      const np = { x: p.x, y: p.y };
+      drag = addPoint(np) ? { pt: np, offX: 0, offY: 0 } : null;
+    }
+    downAt = p;
+    render();
+    if (drag) drawLoupe(drag.pt);
+  });
+  view.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const p = toImage(e);
+    drag.pt.x = Math.max(0, Math.min(view.width, p.x + drag.offX));
+    drag.pt.y = Math.max(0, Math.min(view.height, p.y + drag.offY));
+    if (refPts.includes(drag.pt)) calibrate();
+    render(); drawLoupe(drag.pt);
+  });
+  const end = () => {
+    if (drag && refPts.includes(drag.pt)) calibrate();
+    drag = null; loupe.style.display = 'none'; render(); updateStatus();
+  };
+  view.addEventListener('pointerup', end);
+  view.addEventListener('pointercancel', end);
+
+  function addPoint(p) {
+    if (!calibrated() && refPts.length < refNeeded()) {
+      refPts.push(p);
+      if (refPts.length === refNeeded()) calibrate();
+      return true;
+    }
+    if (calibrated()) {
+      if (!pending) pending = p;
+      else { lines.push({ a: pending, b: p }); pending = null; }
+      return true;
+    }
+    return false;
+  }
+
+  function updateStatus() {
+    if (!img) return;
+    const spec = refSpec();
+    if (spec.invalid) {
+      return setStatus('Enter the size of your reference object above (in the selected unit).');
+    }
+    if (!calibrated()) {
+      const n = refNeeded(), left = n - refPts.length;
+      return setStatus(n === 4
+        ? `<b>Step 1 – Calibrate:</b> tap the <b>4 corners</b> of the reference object (${left} left). Drag points to fine-tune.`
+        : `<b>Step 1 – Calibrate:</b> tap both <b>ends of the known length</b> (${left} left).`);
+    }
+    if (pending) return setStatus('<b>Step 2 – Measure:</b> now tap the second end point.');
+    setStatus(lines.length
+      ? 'Tap two more points to add another line. Drag any point to adjust. Objects must lie on the same flat surface as the reference.'
+      : '<b>Step 2 – Measure:</b> tap the two ends of what you want to measure.');
+  }
+  function setStatus(html) { statusEl.innerHTML = html; }
+  const show = el => el.classList.remove('hidden');
+  const hide = el => el.classList.add('hidden');
+
+  // ---------- controls ----------
+  $('btnCamera').onclick = openCamera;
+  $('btnSnap').onclick = snap;
+  $('btnFile').onclick = () => $('fileInput').click();
+  $('fileInput').onchange = e => loadFile(e.target.files[0]);
+  $('btnNew').onclick = newPhoto;
+  $('btnRecal').onclick = () => { refPts = []; H = null; lineScale = null; pending = null; render(); updateStatus(); };
+  $('btnClear').onclick = () => { lines = []; pending = null; render(); updateStatus(); };
+  $('btnUndo').onclick = () => {
+    if (pending) pending = null;
+    else if (lines.length) lines.pop();
+    else if (refPts.length) { refPts.pop(); H = null; lineScale = null; }
+    render(); updateStatus();
+  };
+  $('refType').onchange = () => {
+    const t = $('refType').value;
+    $('customRect').classList.toggle('hidden', t !== 'rect');
+    $('customLine').classList.toggle('hidden', t !== 'line');
+    refPts = []; H = null; lineScale = null; pending = null;
+    render(); updateStatus();
+  };
+  ['rw', 'rh', 'rl'].forEach(id => $(id).oninput = () => { calibrate(); render(); updateStatus(); });
+  $('unit').onchange = () => { calibrate(); render(); };
+  new ResizeObserver(() => { fitCanvas(); render(); }).observe($('stage'));
+
+  if (!navigator.mediaDevices?.getUserMedia) hide($('btnCamera'));
+})();
+</script>
+</body>
+</html>
