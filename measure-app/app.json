@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Camera Measure",
+    "slug": "camera-measure",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.camerameasure.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.camerameasure.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "backgroundColor": "#111418",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Camera Measure uses the camera to photograph the object you want to measure.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Camera Measure opens photos you choose so you can measure objects in them."
+        }
+      ]
+    ]
+  }
+}
